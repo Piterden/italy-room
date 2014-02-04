@@ -1,0 +1,282 @@
+diff --git a/feeds.info b/feeds.info
+index 8041cbf..cb29bc9 100644
+--- a/feeds.info
++++ b/feeds.info
+@@ -45,6 +45,7 @@ files[] = tests/feeds_processor_term.test
+ files[] = tests/feeds_processor_user.test
+ files[] = tests/feeds_scheduler.test
+ files[] = tests/feeds_mapper_link.test
++files[] = tests/feeds_mapper_summary.test
+ files[] = tests/feeds_mapper_taxonomy.test
+ files[] = tests/parser_csv.test
+ 
+diff --git a/mappers/text.inc b/mappers/text.inc
+index 48447d7..743522d 100644
+--- a/mappers/text.inc
++++ b/mappers/text.inc
+@@ -11,21 +11,32 @@
+  * @see FeedsProcessor::getMappingTargets()
+  */
+ function text_feeds_processor_targets_alter(&$targets, $entity_type, $bundle_name) {
+-  $text_types = array(
+-    'list_text',
+-    'text',
+-    'text_long',
+-    'text_with_summary',
+-  );
+   foreach (field_info_instances($entity_type, $bundle_name) as $name => $instance) {
+     $info = field_info_field($name);
+ 
+-    if (in_array($info['type'], $text_types)) {
+-      $targets[$name] = array(
+-        'name' => check_plain($instance['label']),
+-        'callback' => 'text_feeds_set_target',
+-        'description' => t('The @label field of the entity.', array('@label' => $instance['label'])),
+-      );
++    switch ($info['type']) {
++      case 'text_with_summary':
++        $targets[$name] = array(
++          'name' => t('@name: Text', array('@name' => $instance['label'])),
++          'callback' => 'text_with_summary_feeds_set_target',
++          'description' => t('The @label field of the entity.', array('@label' => $instance['label'])),
++        );
++        $targets[$name . ':summary'] = array(
++          'name' => t('@name: Summary', array('@name' => $instance['label'])),
++          'callback' => 'text_with_summary_feeds_set_target',
++          'description' => t('The @label summary field of the entity.', array('@label' => $instance['label'])),
++        );
++      break;
++
++      case 'list_text':
++      case 'text':
++      case 'text_long':
++        $targets[$name] = array(
++          'name' => check_plain($instance['label']),
++          'callback' => 'text_feeds_set_target',
++          'description' => t('The @label field of the entity.', array('@label' => $instance['label'])),
++        );
++      break;
+     }
+   }
+ }
+@@ -77,3 +88,68 @@ function text_feeds_set_target($source, $entity, $target, $value) {
+ 
+   $entity->$target = $field;
+ }
++
++/**
++ * Callback for mapping fields of type "text_with_summary".
++ */
++function text_with_summary_feeds_set_target($source, $entity, $target, $value, $mapping = array()) {
++  // Handle non-multiple value fields.
++  if (!is_array($value)) {
++    $value = array($value);
++  }
++
++  // @todo In issue #1588938, setting a text format per field is proposed.
++  // If that gets in, this piece must be rewritten.
++  // @see https://drupal.org/node/1588938.
++  if (isset($source->importer->processor->config['input_format'])) {
++    $format = $source->importer->processor->config['input_format'];
++  }
++
++  if (strpos($target, ':') !== FALSE) {
++    list($field_name, $sub_field) = explode(':', $target);
++  }
++  else {
++    $field_name = $target;
++    $sub_field = NULL;
++  }
++  $info = field_info_field($field_name);
++
++  // Allow for multiple mappings to the same target.
++  $delta = 0;
++
++  foreach ($value as $v) {
++    if ($info['cardinality'] == $delta) {
++      break;
++    }
++
++    if (is_object($v) && ($v instanceof FeedsElement)) {
++      $v = $v->getValue();
++    }
++
++    if (is_scalar($v)) {
++      if (isset($entity->{$field_name}['und'][$delta]['value'])) {
++        $field['und'][$delta]['value'] = $entity->{$field_name}['und'][$delta]['value'];
++      }
++      if (isset($entity->{$field_name}['und'][$delta]['summary'])) {
++        $field['und'][$delta]['summary'] = $entity->{$field_name}['und'][$delta]['summary'];
++      }
++
++      if (empty($sub_field)) {
++        // Map to the "body" of the field.
++        $field['und'][$delta]['value'] = $v;
++      }
++      elseif ($sub_field == 'summary') {
++        // Map to the summary of the field.
++        $field['und'][$delta]['summary'] = $v;
++      }
++
++      if (isset($format)) {
++        $field['und'][$delta]['format'] = $format;
++      }
++
++      $delta++;
++    }
++  }
++
++  $entity->{$field_name} = $field;
++}
+diff --git a/tests/feeds/node_summary.csv b/tests/feeds/node_summary.csv
+new file mode 100644
+index 0000000..5d59184
+--- /dev/null
++++ b/tests/feeds/node_summary.csv
+@@ -0,0 +1,4 @@
++"guid","title","summary","body"
++1,"Lorem ipsum","Lorem ipsum summary","Lorem ipsum body"
++2,"Ut wisi enim ad minim veniam","","Ut wisi enim ad minim veniam body"
++3,"Duis autem vel eum iriure dolor","",""
+\ No newline at end of file
+diff --git a/tests/feeds_mapper_summary.test b/tests/feeds_mapper_summary.test
+new file mode 100644
+index 0000000..219609c
+--- /dev/null
++++ b/tests/feeds_mapper_summary.test
+@@ -0,0 +1,135 @@
++<?php
++
++/**
++ * @file
++ * Test case for mapping to node summary.
++ */
++
++/**
++ * Class for testing Feeds summary mapper.
++ */
++class FeedsMapperNodeSummaryTestCase extends FeedsMapperTestCase {
++  public static function getInfo() {
++    return array(
++      'name' => 'Mapper: Text with summary',
++      'description' => 'Test Feeds Mapper support for text with summary fields.',
++      'group' => 'Feeds',
++    );
++  }
++
++  /**
++   * Tests importing CSV files for text fields with summary.
++   */
++  public function test() {
++    // Create content type. A field named "body" which is of type "Long text and summary"
++    // will be created by default, so we don't need to create a field of that type here.
++    $typename = $this->createContentType(array());
++
++    // Create and configure importer.
++    $this->createImporterConfiguration();
++    $this->setSettings('syndication', NULL, array('content_type' => '', 'import_period' => FEEDS_SCHEDULE_NEVER));
++    $this->setPlugin('syndication', 'FeedsFileFetcher');
++    $this->setPlugin('syndication', 'FeedsCSVParser');
++    // The "update existing" and "skip hash check" are turned on so we can test later if
++    // the summaries of the nodes get overwritten with the values from the source.
++    $this->setSettings('syndication', 'FeedsNodeProcessor', array('bundle' => $typename, 'update_existing' => 2, 'skip_hash_check' => TRUE));
++    $this->addMappings('syndication',
++      array(
++        0 => array(
++          'source' => 'title',
++          'target' => 'title',
++        ),
++        1 => array(
++          'source' => 'summary',
++          'target' => 'body:summary',
++        ),
++        2 => array(
++          'source' => 'body',
++          'target' => 'body',
++        ),
++        3 => array(
++          'source' => 'guid',
++          'target' => 'guid',
++          'unique' => TRUE,
++        ),
++      )
++    );
++
++    // Import CSV file.
++    $this->importFile('syndication', $this->absolutePath() . '/tests/feeds/node_summary.csv');
++    $this->assertText('Created 3 nodes');
++
++    // Check the three imported nodes.
++    $this->drupalGet('node/1/edit');
++    $this->assertNodeFieldValue('summary', 'Lorem ipsum summary');
++    $this->assertNodeFieldValue('body', 'Lorem ipsum body');
++    $this->drupalGet('node/2/edit');
++    $this->assertNodeFieldValue('summary', '');
++    $this->assertNodeFieldValue('body', 'Ut wisi enim ad minim veniam body');
++    $this->drupalGet('node/3/edit');
++    $this->assertNodeFieldValue('summary', '');
++    $this->assertNodeFieldValue('body', '');
++
++    // Check the teasers of the three imported nodes, assumed to be all present on the front page.
++    $this->drupalGet('');
++    $this->assertText('Lorem ipsum summary');
++    $this->assertNoText('Lorem ipsum body');
++    $this->assertText('Ut wisi enim ad minim veniam body');
++
++    // Now test if the summary/body gets emptied when reimporting the same file.
++    // Because the hash check is skipped (as defined in the settings of the Feeds importer), all
++    // three nodes will be imported again.
++
++    // Set a summary and a text for each imported node.
++    $edit = array(
++      'body[und][0][summary]' => 'Nam liber tempor summary',
++      'body[und][0][value]' => 'Nam liber tempor body',
++    );
++    $this->drupalPost('node/1/edit', $edit, t('Save'));
++    $this->drupalPost('node/2/edit', $edit, t('Save'));
++    $this->drupalPost('node/3/edit', $edit, t('Save'));
++
++    // Import the same CSV file again.
++    $this->importFile('syndication', $this->absolutePath() . '/tests/feeds/node_summary.csv');
++    $this->assertText('Updated 3 nodes');
++
++    // Check the three nodes again.
++    $this->drupalGet('node/1/edit');
++    $this->assertNodeFieldValue('summary', 'Lorem ipsum summary');
++    $this->assertNodeFieldValue('body', 'Lorem ipsum body');
++    $this->drupalGet('node/2/edit');
++    $this->assertNodeFieldValue('summary', '');
++    $this->assertNodeFieldValue('body', 'Ut wisi enim ad minim veniam body');
++    $this->drupalGet('node/3/edit');
++    $this->assertNodeFieldValue('summary', '');
++    $this->assertNodeFieldValue('body', '');
++
++    // Check the teasers of the three nodes again.
++    $this->drupalGet('');
++    $this->assertText('Lorem ipsum summary');
++    $this->assertNoText('Lorem ipsum body');
++    $this->assertText('Ut wisi enim ad minim veniam body');
++    // The previous texts of the nodes should no longer be visible.
++    $this->assertNoText('Nam liber tempor summary');
++    $this->assertNoText('Nam liber tempor body');
++  }
++
++  /**
++   * Overrides FeedsMapperTestCase::getFormFieldsNames().
++   *
++   * Returns different form field names for:
++   * - body
++   *   This field doesn't have the "field_" prefix.
++   * - summary
++   *   Which is part of the body field.
++   */
++  protected function getFormFieldsNames($field_name, $index) {
++    switch ($field_name) {
++      case 'body':
++        return array("body[und][{$index}][value]");
++      case 'summary':
++        return array("body[und][{$index}][summary]");
++    }
++    return parent::getFormFieldsNames($field_name, $index);
++  }
++}

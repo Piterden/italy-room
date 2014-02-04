@@ -1,0 +1,14 @@
+name = Localization update configuration
+description = Allows you to choose default location server for the Localization Update module
+dependencies[] = l10n_update
+core = 7.x
+package = Multilingual
+
+files[] = l10n_update_config.module
+files[] = l10n_update_config_servers.inc
+; Information added by drupal.org packaging script on 2013-10-29
+version = "7.x-1.x-dev"
+core = "7.x"
+project = "l10n_update_config"
+datestamp = "1383008474"
+

@@ -1,0 +1,37 @@
+<?php
+/**
+ * @file
+ *   This module allows you to choose a location server for the Localization Update module
+ *
+ */
+
+/**
+ * hook_form_alter(&$form, &$form_state, $form_id)
+ */
+function l10n_update_config_form_alter(&$form, &$form_state, $form_id) {
+  if($form_id == 'l10n_update_admin_settings_form') {
+    require_once('l10n_update_config_servers.inc');
+    $servers = l10n_update_config_get_servers();
+    $slist_desc = t('A list of available servers:').'<ul>';
+    foreach($servers as $server => $config){
+      $options[$server] = $server;
+      $slist_desc .= '<li>'.$server.' - '.t($config['description']).'</li>';
+    }
+    $slist_desc .= '</ul>';
+    $form['l10n_update_default_server'] = array(
+      '#type' => 'select',
+      '#title' => t('Default localization server'),
+      '#default_value' => variable_get('l10n_update_default_server', L10N_UPDATE_DEFAULT_SERVER),
+      '#options' => $options,
+      '#description' => t('Select default server to download translations from.').'<br/>'.$slist_desc,
+    );
+    $form['#submit'][] = 'l10n_update_config_submit';
+  }
+}
+
+function l10n_update_config_submit($form, $form_state) {
+  $servers = l10n_update_config_get_servers();
+  $default_server = $form_state['values']['l10n_update_default_server'];
+  variable_set('l10n_update_default_server_url', $servers[$default_server]['l10n_update_default_server_url']);
+  variable_set('l10n_update_default_update_url', $servers[$default_server]['l10n_update_default_update_url']);
+}
